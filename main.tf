@@ -180,7 +180,12 @@ resource "aws_eks_node_group" "nodes" {
     ec2_ssh_key = var.key_pair_name
   }
 
-  depends_on = [aws_iam_role_policy_attachment.node_policies]
+  depends_on = [
+    aws_iam_role_policy_attachment.node_policies,
+    aws_eks_addon.vpc_cni,
+    aws_eks_addon.coredns,
+    aws_eks_addon.kube_proxy
+    ]
 }
 
 # Adds ON 
