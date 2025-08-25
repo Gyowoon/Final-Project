@@ -107,4 +107,95 @@ resource "aws_route_table_association" "private2" {
 }
 
 # IAM Roles for EKS Cluster and Node Group
-resource "aws_iam_role" "eks_cluster
+resource "aws_iam_role" "eks_cluster" {
+  name = var.cluster_role_name
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = { Service = "eks.amazonaws.com" }
+      Action = ["sts:AssumeRole","sts:TagSession"]
+    }]
+  })
+}
+resource "aws_iam_role_policy_attachment" "cluster_policies" {
+  count      = length(var.cluster_policies)
+  role       = aws_iam_role.eks_cluster.name
+  policy_arn = var.cluster_policies[count.index]
+}
+
+resource "aws_iam_role" "eks_node" {
+  name = var.node_role_name
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+resource "aws_iam_role_policy_attachment" "node_policies" {
+  count      = length(var.node_policies)
+  role       = aws_iam_role.eks_node.name
+  policy_arn = var.node_policies[count.index]
+}
+
+# EKS Cluster
+resource "aws_eks_cluster" "eks" {
+  name     = var.cluster_name
+  role_arn = aws_iam_role.eks_cluster.arn
+  version  = var.k8s_version
+
+  vpc_config {
+    subnet_ids = [
+      aws_subnet.public1.id,
+      aws_subnet.public2.id,
+      aws_subnet.private1.id,
+      aws_subnet.private2.id,
+    ]
+  }
+}
+
+# EKS Node Group
+resource "aws_eks_node_group" "nodes" {
+  cluster_name    = aws_eks_cluster.eks.name
+  node_group_name = var.node_group_name
+  node_role_arn   = aws_iam_role.eks_node.arn
+  subnet_ids      = [aws_subnet.public1.id, aws_subnet.public2.id]
+
+  ami_type       = "AL2023_x86_64_STANDARD"
+  instance_types = ["m7i-flex.large"]
+  capacity_type  = "ON_DEMAND"
+
+  scaling_config {
+    desired_size = 2
+    min_size     = 2
+    max_size     = 2
+  }
+
+  disk_size = 20
+
+  remote_access {
+    ec2_ssh_key = var.key_pair_name
+  }
+
+  depends_on = [aws_iam_role_policy_attachment.node_policies]
+}
+
+# Adds ON 
+
+resource "aws_eks_addon" "vpc_cni" {
+  cluster_name = aws_eks_cluster.eks.name
+  addon_name   = "vpc-cni"
+}
+
+resource "aws_eks_addon" "coredns" {
+  cluster_name = aws_eks_cluster.eks.name
+  addon_name   = "coredns"
+}
+
+resource "aws_eks_addon" "kube_proxy" {
+  cluster_name = aws_eks_cluster.eks.name
+  addon_name   = "kube-proxy"
+}
