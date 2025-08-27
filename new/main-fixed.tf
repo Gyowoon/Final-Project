@@ -11,17 +11,19 @@ terraform {
   }
 }
 
-provider "aws" {
+# AWS 를 Provider로 지정 
+provider "aws" {  
   region = var.region
 }
 
+# Terraform 실행 시 연결된 AWS 계정 정보 조회 (aws sts get-caller-identity)
 data "aws_caller_identity" "current" {}
 
 # 클러스터 생성 이후 kubernetes provider가 동작하도록 exec 사용
 provider "kubernetes" {
   host                   = aws_eks_cluster.eks.endpoint
   cluster_ca_certificate = base64decode(aws_eks_cluster.eks.certificate_authority[0].data)
-  exec {
+  exec { # 
     api_version = "client.authentication.k8s.io/v1beta1"
     command     = "aws"
     args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.eks.name, "--region", var.region]
@@ -34,7 +36,7 @@ resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
   enable_dns_support   = true
-  tags = {
+  tags = { # 아래와 같이 태그 추가 
     Name                                        = "MyVPC" # This is your VPC Name 
     "kubernetes.io/cluster/${var.cluster_name}" = "shared"
   }
@@ -241,6 +243,40 @@ resource "aws_iam_role_policy" "shopping_mall_policy" {
   })
 }
 
+
+# EKS Cluster with Access Entries
+resource "aws_eks_cluster" "eks" {
+  name     = var.cluster_name
+  role_arn = aws_iam_role.eks_cluster.arn
+  version  = var.k8s_version
+
+  vpc_config {
+    subnet_ids = [
+      aws_subnet.public1.id,
+      aws_subnet.public2.id,
+      aws_subnet.private1.id,
+      aws_subnet.private2.id,
+    ]
+
+    endpoint_public_access  = true
+    endpoint_private_access = true
+    public_access_cidrs     = var.public_access_cidrs
+  }
+
+  access_config {
+    authentication_mode                         = "API"
+    bootstrap_cluster_creator_admin_permissions = true
+  }
+
+  depends_on = [aws_iam_role_policy_attachment.cluster_policies]
+
+  # kubeconfig 자동 갱신 추가 08/27-Edited
+  provisioner "local-exec" {
+    command = "aws eks update-kubeconfig --region ${var.region} --name ${self.name}"
+  }
+}
+
+/*
 # EKS Cluster with Access Entries
 resource "aws_eks_cluster" "eks" {
   name     = var.cluster_name
@@ -268,6 +304,7 @@ resource "aws_eks_cluster" "eks" {
 
   depends_on = [aws_iam_role_policy_attachment.cluster_policies]
 }
+*/
 
 # EKS Add-ons VPC_CNI
 resource "aws_eks_addon" "vpc_cni" {
