@@ -1,0 +1,121 @@
+# ====== 1) kubeconfig / OIDC ======
+aws eks update-kubeconfig --region $REGION --name $CLUSTER_NAME
+
+# 2-1) LBC 권한 정책 준비(존재하면 재사용)
+if ! aws iam list-policies --scope Local --query "Policies[?PolicyName=='AWSLoadBalancerControllerIAMPolicy'].Arn | [0]" --output text | grep -q 'arn:'; then
+  curl -sS -o iam_policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.13.4/docs/install/iam_policy.json
+  aws iam create-policy --policy-name AWSLoadBalancerControllerIAMPolicy --policy-document file://iam_policy.json >/dev/null
+fi
+POLICY_ARN=$(aws iam list-policies --scope Local --query "Policies[?PolicyName=='AWSLoadBalancerControllerIAMPolicy'].Arn | [0]" --output text)
+
+# 2-2) Pod Identity용 IAM Role 생성(존재하면 스킵)
+ROLE_NAME=AmazonEKSLoadBalancerControllerRole
+if ! aws iam get-role --role-name $ROLE_NAME >/dev/null 2>&1; then
+  cat > lbc-trust.json <<'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "pods.eks.amazonaws.com" },
+    "Action": [ "sts:AssumeRole", "sts:TagSession" ]
+  }]
+}
+JSON
+  aws iam create-role --role-name $ROLE_NAME --assume-role-policy-document file://lbc-trust.json >/dev/null
+  aws iam attach-role-policy --role-name $ROLE_NAME --policy-arn $POLICY_ARN
+fi
+ROLE_ARN=$(aws iam get-role --role-name $ROLE_NAME --query 'Role.Arn' --output text)
+
+# 2-3) Helm으로 컨트롤러 설치(기본 SA 사용)
+helm repo add eks https://aws.github.io/eks-charts >/dev/null
+helm upgrade -i aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system --create-namespace \
+  --set clusterName=$CLUSTER_NAME \
+  --set region=$REGION \
+  --set vpcId=$(aws eks describe-cluster --name $CLUSTER_NAME --region $REGION \
+      --query "cluster.resourcesVpcConfig.vpcId" --output text)
+
+# 2-4) SA와 Role을 Pod Identity Association으로 연결(중복 생성 시 에러 무시)
+aws eks create-pod-identity-association \
+  --cluster-name $CLUSTER_NAME \
+  --namespace kube-system \
+  --service-account aws-load-balancer-controller \
+  --role-arn $ROLE_ARN >/dev/null || true
+
+kubectl -n kube-system rollout status deploy/aws-load-balancer-controller --timeout=3m
+
+# ====== 3) 앱 컨테이너 이미지 빌드/푸시 (ECR) ======
+aws ecr create-repository --repository-name shop-frontend --region $REGION >/dev/null 2>&1 || true
+aws ecr create-repository --repository-name shop-backend  --region $REGION >/dev/null 2>&1 || true
+
+aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
+
+# (로컬에 소스가 있다고 가정: ./shop-eks/{frontend,backend})
+pushd shop-eks/frontend
+docker build -t $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/shop-frontend:latest .
+docker push    $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/shop-frontend:latest
+popd
+
+pushd shop-eks/backend
+docker build -t $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/shop-backend:latest .
+docker push    $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/shop-backend:latest
+popd
+
+# ====== 4) 네임스페이스/시크릿/매니페스트 적용 ======
+kubectl apply -f shop-eks/k8s/namespaces.yaml
+
+# 시크릿(이미 있으면 스킵, 값은 미리 채워두기)
+kubectl -n shop create secret generic shop-secrets \
+  --from-literal=DB_URI="mysql+pymysql://shopuser:<DB-PASSWORD>@<RDS-ENDPOINT>:3306/shopdb" \
+  --from-literal=JWT_SECRET_KEY="<YOUR-JWT-SECRET>" \
+  --from-literal=REDIS_URL="redis://<REDIS-ENDPOINT>:6379/0" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# ECR 이미지 경로 치환(최초 1회만)
+ECR="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
+sed -i "s#<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com#$ECR#g" \
+  shop-eks/k8s/backend-deployment.yaml shop-eks/k8s/frontend-deployment.yaml
+
+# Ingress Host를 내 도메인으로 교체
+sed -i "s/host: shop\.example\.com/host: $FQDN/" shop-eks/k8s/ingress.yaml
+
+# 배포
+kubectl apply -f shop-eks/k8s/backend-deployment.yaml
+kubectl apply -f shop-eks/k8s/backend-service.yaml
+kubectl apply -f shop-eks/k8s/frontend-deployment.yaml
+kubectl apply -f shop-eks/k8s/frontend-service.yaml
+kubectl apply -f shop-eks/k8s/ingress.yaml
+
+
+# ====== 5) Route 53 A-ALIAS (shop.gyowoon.shop → ALB) ======
+HZ_ID=$(aws route53 list-hosted-zones-by-name --dns-name $DOMAIN --query 'HostedZones[0].Id' --output text)
+ALB_DNS=$(kubectl -n shop get ingress shop-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+# ALB HostedZoneId 구하기
+ALB_HZ=$(aws elbv2 describe-load-balancers --names $(echo $ALB_DNS | cut -d'-' -f1-3) --region $REGION \
+  --query 'LoadBalancers[0].CanonicalHostedZoneId' --output text 2>/dev/null || true)
+# HostedZoneId 조회가 이름 기반으로 실패할 수 있어, 보조 방식(전체 검색)
+if [ "$ALB_HZ" = "None" ] || [ -z "$ALB_HZ" ]; then
+  ALB_HZ=$(aws elbv2 describe-load-balancers --region $REGION \
+    --query "LoadBalancers[?DNSName=='$ALB_DNS'].CanonicalHostedZoneId | [0]" --output text)
+fi
+
+cat > /tmp/rr.json <<JSON
+{
+  "Comment": "Alias to ALB for $FQDN",
+  "Changes": [{
+    "Action": "UPSERT",
+    "ResourceRecordSet": {
+      "Name": "$FQDN",
+      "Type": "A",
+      "AliasTarget": {
+        "HostedZoneId": "$ALB_HZ",
+        "DNSName": "$ALB_DNS",
+        "EvaluateTargetHealth": false
+      }
+    }
+  }]
+}
+JSON
+aws route53 change-resource-record-sets --hosted-zone-id $HZ_ID --change-batch file:///tmp/rr.json >/dev/null
+
+echo "[OK] Visit: http://$FQDN  (HTTPS 원하면 ACM 발급 후 Ingress에 cert ARN 추가)"
