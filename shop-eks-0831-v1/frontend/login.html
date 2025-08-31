@@ -237,6 +237,10 @@
                     const email = document.getElementById('email').value.trim();
                     const password = document.getElementById('password').value.trim();
 
+                    console.log('=== LOGIN DEBUG ===');
+                    console.log('Email:', email);
+                    console.log('Password length:', password.length);
+
                     if (!email || !password) {
                         throw new Error('이메일과 비밀번호를 모두 입력해주세요.');
                     }
@@ -255,7 +259,10 @@
                         body: JSON.stringify({ email, password })
                     });
 
+                    console.log('Response status:', response.status);
+                    
                     const data = await response.json();
+                    console.log('Response data:', data);
 
                     if (!response.ok) {
                         throw new Error(data.error || '로그인 중 오류가 발생했습니다.');

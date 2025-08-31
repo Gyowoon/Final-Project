@@ -159,7 +159,7 @@
             </div>
 
             <button type="submit" class="signup-btn" id="signup-btn">
-                동의하고 가입하기
+                회원가입
             </button>
         </form>
 
@@ -197,7 +197,7 @@
                 if (isLoading) {
                     signupBtn.innerHTML = '<div class="loading"></div>처리 중...';
                 } else {
-                    signupBtn.innerHTML = '동의하고 가입하기';
+                    signupBtn.innerHTML = '회원가입';
                 }
             }
 
