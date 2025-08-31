@@ -1,0 +1,35 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: YourEKS-ClusterName
+  region: ap-northeast-2
+  version: "1.33"
+
+# VPC 설정
+vpc:
+  cidr: '10.10.0.0/16'
+  subnets:
+    public:
+      ap-northeast-2a: 
+        cidr: '10.10.1.0/24'
+      ap-northeast-2c: 
+        cidr: '10.10.2.0/24'
+    private:
+      ap-northeast-2a: 
+        cidr: '10.10.11.0/24'
+      ap-northeast-2c: 
+        cidr: '10.10.12.0/24'
+
+# 노드 그룹
+nodeGroups:
+  - name: YourEKSNodeGroups
+    instanceType: m7i-flex.large
+    amiFamily: AmazonLinux2023
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 2
+    volumeSize: 20
+    subnets: ['ap-northeast-2a', 'ap-northeast-2c']
+    ssh:
+      publicKeyName: EKS-Cluster-KEY #YOUR_KEY_PAIR_NAME  # 실제 키페어 이름으로 변경

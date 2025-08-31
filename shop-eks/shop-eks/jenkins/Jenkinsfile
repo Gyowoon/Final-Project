@@ -1,0 +1,40 @@
+pipeline {
+  agent any
+  environment {
+    AWS_DEFAULT_REGION = 'ap-northeast-2'
+    ECR_REGISTRY = '<ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com'
+    BACK_REPO = "${ECR_REGISTRY}/shop-backend"
+    FRONT_REPO = "${ECR_REGISTRY}/shop-frontend"
+  }
+  stages {
+    stage('Checkout') {
+      steps {
+        // Replace with your own Git repository
+        git branch: 'main', url: 'https://github.com/your/repo.git'
+      }
+    }
+    stage('Login ECR') {
+      steps {
+        sh 'aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY'
+      }
+    }
+    stage('Build & Push Backend') {
+      steps {
+        sh '''
+          cd backend
+          docker build -t $BACK_REPO:latest .
+          docker push $BACK_REPO:latest
+        '''
+      }
+    }
+    stage('Build & Push Frontend') {
+      steps {
+        sh '''
+          cd frontend
+          docker build -t $FRONT_REPO:latest .
+          docker push $FRONT_REPO:latest
+        '''
+      }
+    }
+  }
+}
